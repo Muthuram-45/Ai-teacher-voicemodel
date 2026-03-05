@@ -1,0 +1,10 @@
+Flask
+Flask-Cors
+TTS
+sounddevice
+soundfile
+numpy
+python-dotenv
+transformers==4.33.0
+torch
+torchaudio
