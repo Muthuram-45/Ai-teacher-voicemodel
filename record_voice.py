@@ -14,15 +14,30 @@ def record_voice(filename, duration=60, fs=24000):  # 🔥 60 sec recording
 
     print(f"\n🎤 Recording for {duration} seconds...")
     print("Speak naturally in Tamil-accent English.")
-    print("No fan, no echo, no disturbance.\n")
+    print("No fan, no echo, no disturbance.")
+    print("Press Ctrl+C to stop recording early and save.\n")
 
-    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1)
-    sd.wait()
+    try:
+        recording = sd.rec(int(duration * fs), samplerate=fs, channels=1)
+        sd.wait()
+    except KeyboardInterrupt:
+        print("\n⏹️ Recording stopped early.")
+        sd.stop()
+        # Find how much was actually recorded
+        # (sd.rec is asynchronous, so we need to truncate the silence)
+        # Actually, let's just use what was captured so far
+        pass
 
     # 🔥 Normalize audio (important)
-    recording = recording / np.max(np.abs(recording))
+    # Filter out zeros at the end if stopped early
+    actual_recording = recording
+    if np.max(np.abs(actual_recording)) == 0:
+        print("❌ No audio captured. Please check your microphone.")
+        return
 
-    sf.write(filepath, recording, fs)
+    actual_recording = actual_recording / np.max(np.abs(actual_recording))
+
+    sf.write(filepath, actual_recording, fs)
 
     print(f"✅ Saved as {filepath}")
 

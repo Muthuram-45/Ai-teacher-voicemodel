@@ -1,4 +1,15 @@
+# pyrefly: ignore [missing-import]
 import torch
+import torch.serialization
+try:
+    # Allow XTTS configs to be loaded in PyTorch 2.6+
+    from TTS.tts.configs.xtts_config import XttsConfig
+    from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
+    from TTS.config.shared_configs import BaseDatasetConfig
+    torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
+except ImportError:
+    pass
+
 from TTS.api import TTS
 import os
 

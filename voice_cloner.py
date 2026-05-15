@@ -6,13 +6,15 @@ from flask import Flask, request, Response, jsonify
 from flask_cors import CORS
 from TTS.api import TTS
 from TTS.tts.configs.xtts_config import XttsConfig
+from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
+from TTS.config import BaseDatasetConfig
 
 import soundfile as sf
 import requests
 
-# Allowlist XttsConfig for torch.load security
+# Allowlist XTTS classes for torch.load security (PyTorch 2.6+)
 if hasattr(torch, "serialization"):
-    torch.serialization.add_safe_globals([XttsConfig])
+    torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, XttsArgs, BaseDatasetConfig])
 
 # ===============================
 # Performance Optimizations
