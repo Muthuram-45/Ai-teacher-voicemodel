@@ -19,3 +19,4 @@ python-dotenv
 transformers==4.33.0
 torch
 torchaudio
+gunicorn
