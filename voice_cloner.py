@@ -1,6 +1,7 @@
 import os
 import re
 import threading
+import time
 import torch
 from flask import Flask, request, Response, jsonify
 from flask_cors import CORS
@@ -49,6 +50,10 @@ gpt_cond_latent = None
 speaker_embedding = None
 current_active_voice = None
 last_voice_mtime = 0
+
+# Deduplication State
+last_synthesized_text = None
+last_synthesize_time = 0
 
 def load_embeddings():
     global gpt_cond_latent, speaker_embedding, current_active_voice, last_voice_mtime
@@ -171,12 +176,21 @@ def split_text_into_safe_chunks(text, max_chars=200):
 
 @app.route("/synthesize", methods=["POST"])
 def synthesize():
+    global last_synthesized_text, last_synthesize_time
     load_embeddings()
     data = request.json
     text = data.get("text")
 
     if not text:
         return jsonify({"error": "No text provided"}), 400
+
+    # 🚫 Deduplication Logic (within 2 seconds)
+    if text == last_synthesized_text and (time.time() - last_synthesize_time < 2):
+        print(f"🚫 Duplicate request detected for: {text[:30]}... - Skipping")
+        return Response(b"", mimetype="audio/l16; rate=24000")
+
+    last_synthesized_text = text
+    last_synthesize_time = time.time()
 
     text = clean_text(text)
     
@@ -220,8 +234,7 @@ def synthesize():
                         if max_val > 0:
                             wav = wav / max_val
                         
-                        # 🔥 ✂️ Silence Trimming (Remove leading/trailing padding)
-                        # Find indices where energy > threshold
+                        # 🔥 ✂️ Silence Trimming
                         threshold = 0.01
                         energy = torch.abs(wav)
                         mask = energy > threshold
@@ -230,7 +243,6 @@ def synthesize():
                         if indices.numel() > 0:
                             start_idx = indices[0].item()
                             end_idx = indices[-1].item()
-                            # Keep a tiny bit of padding (50ms) for naturalness
                             pad = int(24000 * 0.05)
                             start_idx = max(0, start_idx - pad)
                             end_idx = min(wav.shape[0], end_idx + pad)
@@ -239,13 +251,17 @@ def synthesize():
                         pcm = (wav * 32767).clamp(-32768, 32767).short()
                         yield pcm.cpu().numpy().tobytes()
 
-                print("✅ Speech generated (Gap-Free Streaming Mode)")
+                print("✅ Speech generated (Full Buffer Mode)")
 
             except Exception as e:
                 print(f"❌ Error during multi-chunk synthesis: {e}")
 
+    # 📦 Collect all chunks into a single buffer before sending
+    # This fulfills the goal: "play/speak the audio fail only processing completed"
+    all_audio_data = b"".join(list(generate()))
+
     return Response(
-        generate(),
+        all_audio_data,
         mimetype="audio/l16; rate=24000",
         headers={
             "Cache-Control": "no-cache",
