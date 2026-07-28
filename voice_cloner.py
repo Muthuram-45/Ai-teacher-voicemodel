@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import threading
 import torch
 from flask import Flask, request, Response, jsonify
@@ -11,6 +12,12 @@ from TTS.config import BaseDatasetConfig
 
 import soundfile as sf
 import requests
+import numpy as np
+import sys
+
+# Force UTF-8 output to prevent UnicodeEncodeError on Windows
+if sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
 
 # Allowlist XTTS classes for torch.load security (PyTorch 2.6+)
 if hasattr(torch, "serialization"):
@@ -27,7 +34,7 @@ torch.set_num_threads(4)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"🚀 Device detected: {device}")
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='frontend/dist', static_url_path='')
 CORS(app)
 
 # ===============================
@@ -169,6 +176,9 @@ def split_text_into_safe_chunks(text, max_chars=200):
 # Synthesis
 # ===============================
 
+synthesis_cache = {}
+CACHE_TTL = 15  # seconds
+
 @app.route("/synthesize", methods=["POST"])
 def synthesize():
     load_embeddings()
@@ -186,7 +196,21 @@ def synthesize():
 
     def generate():
         with model_lock:
+            # === CACHE CHECK ===
+            now = time.time()
+            for k in list(synthesis_cache.keys()):
+                if now - synthesis_cache[k]['time'] > CACHE_TTL:
+                    del synthesis_cache[k]
+                    
+            cache_key = f"{current_active_voice}_{text}"
+            if cache_key in synthesis_cache:
+                print(f"⚡ Returning cached audio for: {text[:30]}...")
+                yield synthesis_cache[cache_key]['audio']
+                return
+            # ===================
+
             try:
+                full_audio = b""
                 for i, chunk in enumerate(text_chunks):
                     if not chunk.strip():
                         continue
@@ -237,7 +261,16 @@ def synthesize():
                             wav = wav[start_idx:end_idx]
 
                         pcm = (wav * 32767).clamp(-32768, 32767).short()
-                        yield pcm.cpu().numpy().tobytes()
+                        chunk_bytes = pcm.cpu().numpy().tobytes()
+                        full_audio += chunk_bytes
+                        yield chunk_bytes
+
+                # === SAVE CACHE ===
+                synthesis_cache[cache_key] = {
+                    'audio': full_audio,
+                    'time': time.time()
+                }
+                # ==================
 
                 print("✅ Speech generated (Gap-Free Streaming Mode)")
 
@@ -252,6 +285,77 @@ def synthesize():
             "X-Format": "pcm16"
         }
     )
+
+@app.route("/")
+def index():
+    return app.send_static_file("index.html")
+
+@app.route("/api/voices", methods=["GET"])
+def list_voices():
+    os.makedirs(VOICES_DIR, exist_ok=True)
+    voices = [f for f in os.listdir(VOICES_DIR) if f.endswith(".wav")]
+    return jsonify({"voices": voices})
+
+@app.route("/api/upload_voice", methods=["POST"])
+def upload_voice():
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio file provided"}), 400
+    
+    file = request.files["audio"]
+    name = request.form.get("name", "recorded_voice").strip()
+    if not name.endswith(".wav"):
+        name += ".wav"
+        
+    os.makedirs(VOICES_DIR, exist_ok=True)
+    filepath = os.path.join(VOICES_DIR, name)
+    file.save(filepath)
+    
+    # Normalize the audio as done in record_voice.py
+    try:
+        data, fs = sf.read(filepath)
+        if len(data.shape) > 1:
+            data = data.mean(axis=1) # convert to mono
+        if np.max(np.abs(data)) > 0:
+            data = data / np.max(np.abs(data))
+        sf.write(filepath, data, fs)
+    except Exception as e:
+        print(f"Error normalizing audio: {e}")
+
+    return jsonify({"success": True, "filename": name})
+
+@app.route("/api/precompute", methods=["POST"])
+def precompute_voice():
+    data = request.json
+    filename = data.get("filename")
+    if not filename:
+        return jsonify({"error": "Filename required"}), 400
+        
+    voice_path = os.path.join(VOICES_DIR, filename)
+    if not os.path.exists(voice_path):
+        return jsonify({"error": f"Voice {filename} not found"}), 404
+        
+    print(f"🎤 Extracting conditioning latents for {filename}...")
+    try:
+        with model_lock:
+            with torch.inference_mode():
+                model_gpt_cond_latent, model_speaker_embedding = tts.synthesizer.tts_model.get_conditioning_latents(
+                    audio_path=voice_path
+                )
+                
+            torch.save({
+                "gpt_cond_latent": model_gpt_cond_latent.cpu(),
+                "speaker_embedding": model_speaker_embedding.cpu()
+            }, "speaker_embedding.pt")
+            
+        print("✅ speaker_embedding.pt created successfully!")
+        
+        # We should also reload embeddings after precomputing if we want it to be active immediately?
+        # Not explicitly requested, but good idea. We will let load_embeddings handle it on next request.
+        
+        return jsonify({"success": True, "message": "Precomputed successfully"})
+    except Exception as e:
+        print(f"❌ Error during precompute: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/health", methods=["GET"])
 def health():
